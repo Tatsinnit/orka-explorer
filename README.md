@@ -4,6 +4,16 @@ Orka Control is an experimental, local-only companion for discovering, bootstrap
 
 It does not replace the embedded Orka dashboard. Use it before installation or when the controller is unavailable; use the embedded dashboard for normal Orka operation.
 
+![Orka Explorer cluster crawl with a ready Orka installation](docs/assets/overview.png)
+
+## Status rod
+
+The optional Agent Pod turns discovered Agents and active Tasks into a small aquarium. Cast the read-only status rod to inspect what an Orka is doing without interrupting its work.
+
+![Agent Pod status rod interaction using representative data](docs/assets/agent-pod.gif)
+
+The visuals above are generated from the real production UI with deterministic representative data. No kubeconfig or live cluster data is captured.
+
 ## Modes
 
 - **Crawl** reads the selected kubeconfig context and reports Orka CRDs, controller readiness, Tasks, Agents, components, storage, and permissions.
@@ -32,6 +42,23 @@ For a local production build:
 ```bash
 bun run check
 bun run start
+```
+
+## Development
+
+See [docs/development.md](docs/development.md) for:
+
+- architecture and request flow
+- security and process-lifecycle invariants
+- Crawl, Task, and Quick Deploy contracts
+- updating the pinned Orka release
+- test strategy and documentation capture
+
+Regenerate the documentation visuals with:
+
+```bash
+bunx playwright install chromium
+bun run docs:capture
 ```
 
 ## Security boundary

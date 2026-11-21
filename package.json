@@ -11,6 +11,7 @@
     "dev:web": "vite build --watch",
     "dev:gateway": "tsx watch server/index.ts",
     "build": "tsc -b && tsc -p tsconfig.server.json && vite build",
+    "docs:capture": "bun run build && tsx scripts/capture-docs.ts",
     "test": "tsx --test server/*.test.ts",
     "typecheck": "tsc -b --pretty false && tsc -p tsconfig.server.json --pretty false --noEmit",
     "check": "bun run typecheck && bun run build && bun run test",
@@ -29,6 +30,7 @@
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.1.1",
     "concurrently": "10.0.7",
+    "playwright": "1.65.1",
     "tsx": "4.23.15",
     "typescript": "5.9.3",
     "vite": "7.3.8"
