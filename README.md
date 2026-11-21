@@ -1,6 +1,6 @@
 # Orka Control
 
-Orka Control is an experimental, local-only companion for discovering, bootstrapping, and smoke-testing Orka on Kubernetes. It addresses [#1236](https://github.com/orka-agents/orka/issues/1236).
+Orka Control is an experimental, local-only companion for discovering, bootstrapping, and smoke-testing [Orka](https://github.com/orka-agents/orka) on Kubernetes. It originated from [orka-agents/orka#1236](https://github.com/orka-agents/orka/issues/1236).
 
 It does not replace the embedded Orka dashboard. Use it before installation or when the controller is unavailable; use the embedded dashboard for normal Orka operation.
 
@@ -21,7 +21,6 @@ It does not replace the embedded Orka dashboard. Use it before installation or w
 ## Run locally
 
 ```bash
-cd tools/orka-control
 bun install --frozen-lockfile
 bun run dev
 ```

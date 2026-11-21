@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canonicalIdempotencyKey, normalizeTask, rulesAllow, sanitizeServer, selectControllerDeployment, stableUserInfo, taskCountsAgainstQuota, taskNameForRequest, type AuthorizationRule } from "./cluster.js";
+import { canonicalIdempotencyKey, installationState, normalizeAgent, normalizeTask, rulesAllow, sanitizeServer, selectControllerDeployment, stableUserInfo, taskCountsAgainstQuota, taskNameForRequest, type AuthorizationRule } from "./cluster.js";
 
 const wildcardRule: AuthorizationRule = {
   verbs: ["*"],
@@ -62,6 +62,16 @@ test("controller discovery supports Helm and Kustomize labels without arbitrary 
   assert.equal(selectControllerDeployment([wrapper, kustomizeController])?.metadata.name, "manager");
   assert.equal(selectControllerDeployment([wrapper, kustomizeController, helmController])?.metadata.name, "controller");
   assert.equal(selectControllerDeployment([wrapper]), undefined);
+});
+
+test("ready controller is degraded when release CRDs are incomplete", () => {
+  assert.equal(installationState({ controllerReady: true, releaseCrdsReady: false, installed: true, foundCrdCount: 26 }), "degraded");
+  assert.equal(installationState({ controllerReady: true, releaseCrdsReady: true, installed: true, foundCrdCount: 27 }), "ready");
+});
+
+test("Agent task type follows runtime configuration", () => {
+  assert.equal(normalizeAgent({ metadata: { name: "native" }, spec: {}, status: { ready: true } }).taskType, "ai");
+  assert.equal(normalizeAgent({ metadata: { name: "runtime" }, spec: { runtime: { type: "codex" } }, status: { ready: true } }).taskType, "agent");
 });
 
 test("Task names are deterministic and DNS safe", () => {

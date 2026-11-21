@@ -4,7 +4,7 @@ import { Header } from "./components/Header";
 import { Sidebar } from "./components/Sidebar";
 import { consoleApi } from "./data/console";
 import type { ClusterReport, InstallPlan, KubeContext, PageId, RunTaskInput } from "./domain";
-import { ContextGuard } from "./lib/context-guard";
+import { ContextGuard, taskNeedsPolling } from "./lib/context-guard";
 import { Agents } from "./pages/Agents";
 import { Discover } from "./pages/Discover";
 import { Install } from "./pages/Install";
@@ -84,14 +84,24 @@ export default function App() {
   }, []);
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
   useEffect(() => {
-    if (!report?.tasks.some((task) => ["Pending", "Running", "Finalizing"].includes(task.phase)) || !contextName) return;
-    const timer = window.setInterval(() => void crawl(contextName, true, false), 5_000);
-    return () => window.clearInterval(timer);
+    if (!report?.tasks.some((task) => taskNeedsPolling(task.phase)) || !contextName) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      await crawl(contextName, true, false);
+      if (!cancelled) timer = window.setTimeout(() => void poll(), 5_000);
+    };
+    timer = window.setTimeout(() => void poll(), 5_000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [contextName, crawl, report?.tasks]);
 
   const navigate = (nextPage: string) => { window.location.hash = `/${nextPage}`; };
   const changeContext = (nextContext: string) => {
     contextGuard.select(nextContext);
+    setRefreshing(false);
     setContextName(nextContext);
     setReport(undefined);
     setPlan(undefined);

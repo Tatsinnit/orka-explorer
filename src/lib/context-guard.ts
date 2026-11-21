@@ -3,6 +3,10 @@ export interface CrawlToken {
   generation: number;
 }
 
+export function taskNeedsPolling(phase: string): boolean {
+  return ["Unknown", "Pending", "Running", "Finalizing"].includes(phase);
+}
+
 export class ContextGuard {
   private context = "";
   private generation = 0;

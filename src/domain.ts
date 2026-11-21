@@ -42,6 +42,7 @@ export interface OrkaAgent {
   namespace: string;
   ready: boolean;
   runtime: string;
+  taskType: "ai" | "agent";
   model: string;
   activeTasks: number;
   lastUsed?: string;

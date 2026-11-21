@@ -7,6 +7,8 @@ import { z } from "zod";
 import { crawlCluster, createTask, listContexts } from "./cluster.js";
 import { beginShutdown, forceTerminateChildren, runCommand, terminateChildren } from "./command.js";
 import { createInstallPlan, installOrka } from "./install.js";
+import { DomainError } from "./errors.js";
+import { crawlSchema, installSchema, planSchema, runSchema } from "./schemas.js";
 
 const host = "127.0.0.1";
 const requestedPort = Number(process.env.ORKA_CONSOLE_PORT ?? "0");
@@ -19,28 +21,6 @@ const capability = configuredCapability ?? randomBytes(32).toString("base64url")
 const requestBuckets = new Map<string, number[]>();
 let activeApiRequests = 0;
 
-const dnsLabel = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
-const crawlSchema = z.object({ context: z.string().min(1).max(253), namespace: z.string().regex(dnsLabel).optional() }).strict();
-const runSchema = z.object({
-  idempotencyKey: z.string().uuid(),
-  context: z.string().min(1).max(253),
-  namespace: z.string().regex(dnsLabel),
-  mode: z.enum(["smoke", "agent"]),
-  agentName: z.string().regex(dnsLabel).optional(),
-  prompt: z.string().trim().min(1).max(8_000).optional(),
-}).strict().superRefine((value, context) => {
-  if (value.mode === "agent" && (!value.agentName || !value.prompt)) {
-    context.addIssue({ code: "custom", message: "Agent runs require an existing agent and prompt." });
-  }
-});
-const planSchema = z.object({ context: z.string().min(1).max(253) }).strict();
-const installSchema = z.object({
-  planId: z.string().min(20).max(64),
-  context: z.string().min(1).max(253),
-  confirmation: z.string().min(1).max(253),
-  acknowledgeClusterAccess: z.literal(true),
-  acknowledgePersistence: z.literal(true),
-}).strict();
 
 class HttpError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -168,12 +148,12 @@ const server = createServer(async (request, response) => {
       finally { activeApiRequests -= 1; }
     } else await serveStatic(response, url.pathname);
   } catch (error) {
-    const status = error instanceof HttpError ? error.status : error instanceof z.ZodError ? 400 : 500;
+    const status = error instanceof HttpError || error instanceof DomainError ? error.status : error instanceof z.ZodError ? 400 : 500;
     const correlationId = randomBytes(6).toString("hex");
     if (status === 500) console.error(`[${correlationId}]`, error);
     const message = error instanceof z.ZodError
       ? error.issues[0]?.message ?? "Invalid request."
-      : error instanceof HttpError ? error.message : `Cluster operation failed. See gateway log ${correlationId}.`;
+      : error instanceof HttpError || error instanceof DomainError ? error.message : `Cluster operation failed. See gateway log ${correlationId}.`;
     sendJson(response, status, { message });
   }
 });

@@ -7,6 +7,7 @@ import type { ClusterReport, InstallPlan } from "../src/domain.js";
 import { accessAllowed, clusterFingerprint, crawlCluster, requireContext, rulesAllow, subjectRules } from "./cluster.js";
 import { runCommand } from "./command.js";
 import { helmImageArgs, release } from "./release.js";
+import { DomainError } from "./errors.js";
 
 const PLAN_TTL_MS = 5 * 60_000;
 const MAX_PLANS = 32;
@@ -352,12 +353,12 @@ export async function installOrka(input: {
 }): Promise<ClusterReport> {
   const plan = plans.get(input.planId);
   plans.delete(input.planId);
-  if (!plan) throw new Error("The installation plan is missing or was already used. Create a new plan.");
-  if (Date.now() >= new Date(plan.expiresAt).getTime()) throw new Error("The installation plan expired. Create a new plan.");
-  if (!plan.allowed) throw new Error("This installation plan contains blockers and cannot be executed.");
-  if (input.context !== plan.context || input.confirmation !== plan.context) throw new Error("The typed Kubernetes context does not match the installation plan.");
-  if (!input.acknowledgeClusterAccess || !input.acknowledgePersistence) throw new Error("Both installation acknowledgements are required.");
-  if (installInProgress) throw new Error("Another Orka installation is already in progress.");
+  if (!plan) throw new DomainError(404, "The installation plan is missing or was already used. Create a new plan.");
+  if (Date.now() >= new Date(plan.expiresAt).getTime()) throw new DomainError(410, "The installation plan expired. Create a new plan.");
+  if (!plan.allowed) throw new DomainError(409, "This installation plan contains blockers and cannot be executed.");
+  if (input.context !== plan.context || input.confirmation !== plan.context) throw new DomainError(409, "The typed Kubernetes context does not match the installation plan.");
+  if (!input.acknowledgeClusterAccess || !input.acknowledgePersistence) throw new DomainError(400, "Both installation acknowledgements are required.");
+  if (installInProgress) throw new DomainError(409, "Another Orka installation is already in progress.");
 
   installInProgress = true;
   try {
@@ -366,7 +367,7 @@ export async function installOrka(input: {
       clusterFingerprint(plan.context),
     ]);
     plans.delete(freshPlan.id);
-    if (!freshPlan.allowed || fingerprint !== plan.fingerprint) throw new Error("Cluster state changed after planning. Review a new installation plan.");
+    if (!freshPlan.allowed || fingerprint !== plan.fingerprint) throw new DomainError(409, "Cluster state changed after planning. Review a new installation plan.");
     const chartPath = await downloadVerifiedChart();
     await assertVerifiedChart(chartPath);
     await validateRenderedChart(chartPath);

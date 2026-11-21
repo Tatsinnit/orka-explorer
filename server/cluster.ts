@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type {
   ClusterReport,
   ComponentHealth,
+  InstallationState,
   KubeContext,
   OrkaAgent,
   OrkaTask,
@@ -9,6 +10,7 @@ import type {
   TaskPhase,
 } from "../src/domain.js";
 import { runCommand, runJson } from "./command.js";
+import { DomainError } from "./errors.js";
 import { release } from "./release.js";
 
 interface KubeConfigJson {
@@ -73,13 +75,18 @@ export function sanitizeServer(server: string): string {
 
 export async function requireContext(name: string): Promise<KubeContext> {
   const context = (await listContexts()).find((candidate) => candidate.name === name);
-  if (!context) throw new Error("The selected Kubernetes context no longer exists.");
+  if (!context) throw new DomainError(404, "The selected Kubernetes context no longer exists.");
   return context;
 }
 
 async function optionalJson<T>(context: string, args: string[]): Promise<T | undefined> {
   try { return await runJson<T>("kubectl", kubectlArgs(context, args)); }
   catch { return undefined; }
+}
+
+async function requiredJson<T>(context: string, args: string[], description: string): Promise<T> {
+  try { return await runJson<T>("kubectl", kubectlArgs(context, args)); }
+  catch { throw new DomainError(503, `Could not read ${description}; cluster discovery is incomplete.`); }
 }
 
 async function canI(context: string, verb: string, resource: string, namespace?: string): Promise<boolean> {
@@ -188,13 +195,14 @@ export function normalizeTask(resource: Unstructured): OrkaTask {
   };
 }
 
-function normalizeAgent(resource: Unstructured): OrkaAgent {
+export function normalizeAgent(resource: Unstructured): OrkaAgent {
   return {
     uid: resource.metadata.uid ?? `${resource.metadata.namespace}/${resource.metadata.name}`,
     name: resource.metadata.name,
     namespace: resource.metadata.namespace ?? "orka-system",
     ready: resource.status?.ready === true,
     runtime: text(nested(resource.spec, "runtime", "type")) ?? text(nested(resource.spec, "runtime", "runtimeRef", "name")) ?? "native",
+    taskType: nested(resource.spec, "runtime") == null ? "ai" : "agent",
     model: text(nested(resource.spec, "model", "name")) ?? text(resource.spec?.model) ?? "default",
     activeTasks: numberValue(resource.status?.activeTasks),
     lastUsed: text(resource.status?.lastUsed),
@@ -221,19 +229,33 @@ export function selectControllerDeployment(resources: Unstructured[]): Unstructu
     ?? resources.find((item) => item.metadata.labels?.["control-plane"] === "controller-manager");
 }
 
+export function installationState(input: {
+  controllerReady: boolean;
+  releaseCrdsReady: boolean;
+  installed: boolean;
+  foundCrdCount: number;
+}): InstallationState {
+  if (input.controllerReady && input.releaseCrdsReady) return "ready";
+  if (input.installed) return "degraded";
+  if (input.foundCrdCount > 0) return "partial";
+  return "absent";
+}
+
 export async function crawlCluster(contextName: string, namespaceHint?: string): Promise<ClusterReport> {
   const context = await requireContext(contextName);
   const version = await runJson<{ serverVersion?: { gitVersion?: string } }>("kubectl", kubectlArgs(contextName, ["version", "-o", "json"]));
-  const crds = await optionalJson<KubeList<Unstructured>>(contextName, ["get", "crd", "-o", "json"]);
+  const crds = await requiredJson<KubeList<Unstructured>>(contextName, ["get", "crd", "-o", "json"], "Orka custom resource definitions");
   const foundCrds = release.crds.filter((name) => crds?.items.some((item) => item.metadata.name === name));
-  const allDeployments = await optionalJson<KubeList<Unstructured>>(contextName, ["get", "deployments", "--all-namespaces", "-l", "app.kubernetes.io/name=orka", "-o", "json"]);
-  const allServices = await optionalJson<KubeList<Unstructured>>(contextName, ["get", "services", "--all-namespaces", "-l", "app.kubernetes.io/name=orka", "-o", "json"]);
+  const [allDeployments, allServices] = await Promise.all([
+    requiredJson<KubeList<Unstructured>>(contextName, ["get", "deployments", "--all-namespaces", "-l", "app.kubernetes.io/name=orka", "-o", "json"], "cluster-wide Orka deployments"),
+    requiredJson<KubeList<Unstructured>>(contextName, ["get", "services", "--all-namespaces", "-l", "app.kubernetes.io/name=orka", "-o", "json"], "cluster-wide Orka services"),
+  ]);
   const controller = selectControllerDeployment(allDeployments?.items ?? []);
   const namespace = namespaceHint || controller?.metadata.namespace || allServices?.items[0]?.metadata.namespace || "orka-system";
   const releaseName = controller?.metadata.labels?.["app.kubernetes.io/instance"] ?? allServices?.items[0]?.metadata.labels?.["app.kubernetes.io/instance"];
   const versionLabel = controller?.metadata.labels?.["app.kubernetes.io/version"];
 
-  const [nodes, storageClasses, tasks, agents, providers, monitors, scans, pools, deployments, services, pvcs] = await Promise.all([
+  const [nodes, storageClasses, tasks, agents, providers, monitors, scans, pools, pvcs] = await Promise.all([
     optionalJson<KubeList<Unstructured>>(contextName, ["get", "nodes", "-o", "json"]),
     optionalJson<KubeList<Unstructured>>(contextName, ["get", "storageclass", "-o", "json"]),
     foundCrds.includes("tasks.core.orka.ai") ? optionalJson<KubeList<Unstructured>>(contextName, ["get", "tasks.core.orka.ai", "-n", namespace, "-o", "json"]) : undefined,
@@ -242,17 +264,18 @@ export async function crawlCluster(contextName: string, namespaceHint?: string):
     foundCrds.includes("repositorymonitors.core.orka.ai") ? optionalJson<KubeList<Unstructured>>(contextName, ["get", "repositorymonitors.core.orka.ai", "-n", namespace, "-o", "json"]) : undefined,
     foundCrds.includes("repositoryscans.core.orka.ai") ? optionalJson<KubeList<Unstructured>>(contextName, ["get", "repositoryscans.core.orka.ai", "-n", namespace, "-o", "json"]) : undefined,
     optionalJson<KubeList<Unstructured>>(contextName, ["get", "runtimepools.core.orka.ai", "-n", namespace, "-o", "json"]),
-    optionalJson<KubeList<Unstructured>>(contextName, ["get", "deployments", "-n", namespace, "-l", "app.kubernetes.io/name=orka", "-o", "json"]),
-    optionalJson<KubeList<Unstructured>>(contextName, ["get", "services", "-n", namespace, "-l", "app.kubernetes.io/name=orka", "-o", "json"]),
     optionalJson<KubeList<Unstructured>>(contextName, ["get", "pvc", "-n", namespace, "-l", "app.kubernetes.io/name=orka", "-o", "json"]),
   ]);
 
   const defaultStorageClass = storageClasses?.items.find((item) => item.metadata.annotations?.["storageclass.kubernetes.io/is-default-class"] === "true")?.metadata.name;
-  const controllerResource = selectControllerDeployment(deployments?.items ?? []);
+  const controllerResource = controller;
   const controllerReady = controllerResource ? deploymentComponent(controllerResource).ready : false;
-  const installed = Boolean(controllerResource || services?.items.length);
+  const releaseCrdsReady = foundCrds.length === release.crds.length;
+  const namespaceDeployments = allDeployments.items.filter((item) => item.metadata.namespace === namespace);
+  const namespaceServices = allServices.items.filter((item) => item.metadata.namespace === namespace);
+  const installed = Boolean(controllerResource || namespaceServices.length);
   const partial = foundCrds.length > 0 && !installed;
-  const state = controllerReady ? "ready" : installed ? "degraded" : partial ? "partial" : "absent";
+  const state = installationState({ controllerReady, releaseCrdsReady, installed, foundCrdCount: foundCrds.length });
   const permissions: PermissionCheck[] = await Promise.all([
     ["customresourcedefinitions.apiextensions.k8s.io", "get"],
     ["tasks.core.orka.ai", "list"],
@@ -260,14 +283,15 @@ export async function crawlCluster(contextName: string, namespaceHint?: string):
     ["agents.core.orka.ai", "list"],
   ].map(async ([resource, verb]) => ({ resource, verb, allowed: await canI(contextName, verb, resource, resource.includes("core.orka.ai") ? namespace : undefined) })));
   const components: ComponentHealth[] = [
-    ...(deployments?.items ?? []).map(deploymentComponent),
-    ...(services?.items ?? []).map(serviceComponent),
+    ...namespaceDeployments.map(deploymentComponent),
+    ...namespaceServices.map(serviceComponent),
     ...(pvcs?.items ?? []).map(pvcComponent),
   ];
   const warnings: string[] = [];
   if (!defaultStorageClass) warnings.push("No default StorageClass was detected; Orka persistence cannot be provisioned automatically.");
   if (partial) warnings.push("Orka CRDs exist without a live controller. Quick Deploy is blocked to avoid an incompatible reinstall.");
   if (installed && !controllerReady) warnings.push("An Orka release was found, but its controller is not fully ready.");
+  if (installed && !releaseCrdsReady) warnings.push(`The controller is missing ${release.crds.length - foundCrds.length} CRDs required by the reviewed release.`);
 
   return {
     context,
@@ -284,8 +308,10 @@ export async function crawlCluster(contextName: string, namespaceHint?: string):
       crdCount: foundCrds.length,
       expectedCrdCount: release.crds.length,
       controllerReady,
-      message: controllerReady
+      message: controllerReady && releaseCrdsReady
         ? "Orka is installed and the controller is ready."
+        : controllerReady
+          ? "The Orka controller is ready, but required CRDs are missing."
         : installed
           ? "Orka is installed, but the controller needs attention."
           : partial
@@ -326,7 +352,7 @@ function taskPayloadHash(input: { mode: "smoke" | "agent"; agentName?: string; p
 function verifyIdempotentTask(resource: Unstructured, idempotencyKey: string, payloadHash: string): OrkaTask {
   const annotations = resource.metadata.annotations ?? {};
   if (annotations[idempotencyKeyAnnotation] !== idempotencyKey || annotations[payloadHashAnnotation] !== payloadHash) {
-    throw new Error("The deterministic Task name already exists with different input.");
+    throw new DomainError(409, "The deterministic Task name already exists with different input.");
   }
   return normalizeTask(resource);
 }
@@ -347,7 +373,7 @@ export async function createTask(
   const payloadHash = taskPayloadHash(input);
   const existing = taskRequests.get(requestKey);
   if (existing) {
-    if (existing.payloadHash !== payloadHash) throw new Error("This idempotency key was already used for different Task input.");
+    if (existing.payloadHash !== payloadHash) throw new DomainError(409, "This idempotency key was already used for different Task input.");
     return existing.promise;
   }
   if (taskRequests.size >= 128) taskRequests.delete(taskRequests.keys().next().value as string);
@@ -370,27 +396,28 @@ async function createTaskOnce(
   if (existing) return verifyIdempotentTask(existing, input.idempotencyKey, payloadHash);
 
   const report = await crawlCluster(context, namespace);
-  if (report.orka.state !== "ready") throw new Error("Orka must be ready before a Task can run.");
+  if (report.orka.state !== "ready") throw new DomainError(409, "Orka must be ready before a Task can run.");
   const [canList, canCreate] = await Promise.all([
     canI(context, "list", "tasks.core.orka.ai", namespace),
     canI(context, "create", "tasks.core.orka.ai", namespace),
   ]);
-  if (!canList) throw new Error("The current Kubernetes identity cannot list Orka Tasks, so quota cannot be verified.");
-  if (!canCreate) throw new Error("The current Kubernetes identity cannot create Orka Tasks in this namespace.");
+  if (!canList) throw new DomainError(403, "The current Kubernetes identity cannot list Orka Tasks, so quota cannot be verified.");
+  if (!canCreate) throw new DomainError(403, "The current Kubernetes identity cannot create Orka Tasks in this namespace.");
   const taskList = await runJson<KubeList<Unstructured>>("kubectl", kubectlArgs(context, ["get", "tasks.core.orka.ai", "-n", namespace, "-o", "json"]));
   if (taskList.items.map(normalizeTask).filter(taskCountsAgainstQuota).length >= 5) {
-    throw new Error("This console limits each namespace to five active Tasks.");
+    throw new DomainError(409, "This console limits each namespace to five active Tasks.");
   }
+  let selectedAgent: OrkaAgent | undefined;
   if (input.mode === "agent") {
     const agentList = await runJson<KubeList<Unstructured>>("kubectl", kubectlArgs(context, ["get", "agents.core.orka.ai", "-n", namespace, "-o", "json"]));
-    const agent = agentList.items.map(normalizeAgent).find((candidate) => candidate.name === input.agentName);
-    if (!agent) throw new Error("The selected Agent no longer exists in this namespace.");
-    if (!agent.ready) throw new Error("The selected Agent is not ready.");
+    selectedAgent = agentList.items.map(normalizeAgent).find((candidate) => candidate.name === input.agentName);
+    if (!selectedAgent) throw new DomainError(404, "The selected Agent no longer exists in this namespace.");
+    if (!selectedAgent.ready) throw new DomainError(409, "The selected Agent is not ready.");
   }
 
   const spec = input.mode === "smoke"
     ? { type: "container", command: ["/bin/sh", "-c", "printf ORKA_CONSOLE_OK"], timeout: "3m", retryPolicy: { maxRetries: 0 } }
-    : { type: "agent", agentRef: { name: input.agentName }, prompt: input.prompt, timeout: "15m", priority: 100 };
+    : { type: selectedAgent?.taskType ?? "ai", agentRef: { name: input.agentName }, prompt: input.prompt, timeout: "15m", priority: 100 };
   const body = JSON.stringify({
     apiVersion: "core.orka.ai/v1alpha1",
     kind: "Task",
